@@ -1,0 +1,202 @@
+---
+title: "Capstone_3_EDA"
+output: html_document
+date: "2023-10-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(knitr)
+library(formattable)
+library(kableExtra)
+```
+
+
+```{r}
+qualitative_data <- read_csv("qualitative_data_msba.csv")
+
+time_series_data <- read_csv("time_series_data_msba.csv")
+```
+
+```{r}
+str(qualitative_data)
+str(time_series_data)
+
+head(qualitative_data)
+head(time_series_data)
+
+summary(qualitative_data)
+summary(time_series_data)
+```
+
+```{r}
+is.ts(time_series_data)
+```
+```{r}
+# Create column that shows the number of days the store has been open
+ts_w_days <- time_series_data %>%
+  mutate(Days_Since_Open = as.numeric(calendar.calendar_day_date - capital_projects.soft_opening_date)) %>%
+  arrange(site_id_msba, calendar.calendar_day_date)
+
+ts_w_days[c(2:4, 12:13)]
+```
+
+```{r}
+# Define the major holidays data frame
+major_holidays <- data.frame(
+  calendar.calendar_day_date = as.Date(c(
+    "2021-01-01", "2021-01-18", "2021-04-04",
+    "2021-05-31", "2021-07-04", "2021-09-06", "2021-10-11",
+    "2021-10-31", "2021-11-11", "2021-11-25", "2021-12-24",
+    "2021-12-25", "2021-12-31", "2022-01-01", "2022-01-17",
+    "2022-04-17", "2022-05-30", "2022-07-04", "2022-09-05",
+    "2022-10-10", "2022-10-31", "2022-11-11", "2022-11-24",
+    "2022-12-24", "2022-12-25", "2022-12-31"
+  )),
+  Major_Holiday = c(
+    "New Year's Day", "Martin Luther King Jr. Day", "Easter Sunday",
+    "Memorial Day", "Independence Day", "Labor Day", "Columbus Day",
+    "Halloween", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
+    "Christmas Day", "New Year's Eve", "New Year's Day", "Martin Luther King Jr. Day",
+    "Easter Sunday", "Memorial Day", "Independence Day", "Labor Day",
+    "Columbus Day", "Halloween", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
+    "Christmas Day", "New Year's Eve"
+  )
+)
+```
+
+```{r}
+# Merge the original data frame with the major holidays data frame
+ts_w_holidays <- ts_w_days %>%
+  left_join(major_holidays, by = c("calendar.calendar_day_date" = "calendar.calendar_day_date"))
+
+# Make indicator for whether the day fell on a holiday given by Maverik
+ts_all_holidays <- ts_w_holidays %>%
+  mutate(General_Holiday = ifelse(calendar_information.holiday == "NONE", 0, 1))
+
+# Check to make sure holidays are represented correctly
+ts_all_holidays[c("calendar_information.holiday", "Major_Holiday", "General_Holiday")]
+
+# Could remove calendar_information.holiday now that General Holiday gives same information
+```
+
+```{r}
+dow_summary <- ts_all_holidays %>%
+  group_by(calendar.day_of_week) %>%
+  summarize(Avg_inside_sales = mean(daily_yoy_ndt.total_inside_sales),
+            Avg_food_service = mean(daily_yoy_ndt.total_food_service),
+            Avg_diesel_sales = mean(diesel),
+            Avg_unleaded_sales = mean(unleaded))
+
+dow_summary
+```
+
+```{r, out.width='100%', out.height='100%'}
+# Define the order of days of the week
+day_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Reorder the factor levels of calendar.day_of_week
+ts_all_holidays$calendar.day_of_week <- factor(ts_all_holidays$calendar.day_of_week, levels = day_order)
+
+# Create the boxplot with the ordered days of the week
+day_of_week_bp <- ggplot(ts_all_holidays,
+  aes(x = calendar.day_of_week, y = unleaded, color = calendar.day_of_week)) +
+  geom_boxplot(fill = "white") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "Unleaded Sales tend to be the highest on Fridays", x = "Day of Week", y = "Unleaded Sales") +
+  guides(color = FALSE)
+
+day_of_week_bp
+```
+
+```{r, out.width='100%', out.height='100%'}
+# Reshape data from wide to long format
+data_long <- dow_summary %>%
+  pivot_longer(cols = starts_with("Avg_"), names_to = "Sales_Type", values_to = "Average_Sales")
+
+# Order of the days of the week
+day_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+# Apply the order to the factor levels
+data_long$calendar.day_of_week <- factor(data_long$calendar.day_of_week, levels = day_order)
+
+# Create a line chart with ordered days
+line_chart_ordered <- ggplot(data_long, aes(x = calendar.day_of_week, y = Average_Sales, color = Sales_Type, group = Sales_Type)) +
+  geom_line(size = 2) +
+  labs(title = "Trends in Sales Categories over Days of Week",
+       x = "Day of the Week", y = "Average Sales", color = "Sales Type") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# Print the plot
+print(line_chart_ordered)
+```
+
+```{r}
+ts_all_holidays[c(1, 8:13)]
+
+# Create the line graph
+ggplot(ts_all_holidays, aes(x = Days_Since_Open, y = daily_yoy_ndt.total_inside_sales, group = site_id_msba, color = factor(site_id_msba))) +
+  geom_line() +
+  labs(title = "Daily YOY Total Inside Sales",
+       x = "Days Since Open",
+       y = "Total Inside Sales",
+       color = "Store ID") +
+  theme_minimal()
+```
+
+```{r, out.width='100%', out.height='100%'}
+# Choose stores to highlight
+selected_stores <- c(21980, 23240, 24150, 22785)
+
+# Filter the data to include only the selected stores
+stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% selected_stores, ]
+
+# Create the line graph
+ggplot(stores_of_interest, aes(x = Days_Since_Open, y = daily_yoy_ndt.total_inside_sales, group = site_id_msba, color = factor(site_id_msba))) +
+  geom_line(size = 1) +
+  labs(title = "Daily Total Inside Sales for Selected Stores",
+       x = "Number of Days Open",
+       y = "Total Inside Sales",
+       color = "Store ID") +
+  theme_minimal()
+
+# Create the line graph
+ggplot(stores_of_interest, aes(x = Days_Since_Open, y = diesel, group = site_id_msba, color = factor(site_id_msba))) +
+  geom_line(size = 1) +
+  labs(title = "Diesel Sales in First Year for Selected Stores",
+       x = "Number of Days Open",
+       y = "Total Diesel Sales",
+       color = "Store ID") +
+  theme_minimal()
+
+# Create the line graph of selected stores
+ggplot(stores_of_interest, aes(x = Days_Since_Open, y = unleaded, group = site_id_msba, color = factor(site_id_msba))) +
+  geom_line(size = 1) +
+  labs(title = "Unleaded Sales in First Year for Selected Stores",
+       x = "Number of Days Open",
+       y = "Total Unleaded Sales",
+       color = "Store ID") +
+  theme_minimal()
+```
+
+## Questions:
+- Should "major holiday' be defined as the ones that people are generally given the day off for? This distinguishes "all holidays" which will have noise from less significant holidays.
+- Add indicator for day before and after major holidays? (Long weekends, vacation days taken around holidays, camping trips?)
+- Make total sales number for each day which is all categories combined?
+  - graph a breakdown of sales in percentages that are contributed by each category
+- Create an indicator for what part of the season the store opened in?
+
+- Look at differences in weekdays vs. weekend trends between the four categories
+_ Facet wrap to be able to show boxplots for each category side by side?
+- Density plot based on holiday not a holiday, major holiday not major holiday
