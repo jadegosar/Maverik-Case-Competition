@@ -1,5 +1,6 @@
 ---
-title: "Capstone_3_EDA"
+title: "Maverik Project Exploratory Data Analysis"
+author: "Jade Gosar"
 output: html_document
 date: "2023-10-03"
 ---
