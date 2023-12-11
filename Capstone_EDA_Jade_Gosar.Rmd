@@ -10,13 +10,17 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 ```{r}
-library(readr)
-library(dplyr)
-library(tidyr)
+library(lubridate)
+library(tidyverse)
+library(zoo)
 library(ggplot2)
+library(melt)
+library(reshape2)
+library(corrplot)
 library(knitr)
 library(formattable)
 library(kableExtra)
+library(gridExtra)
 ```
 
 
@@ -26,54 +30,43 @@ qualitative_data <- read_csv("qualitative_data_msba.csv")
 time_series_data <- read_csv("time_series_data_msba.csv")
 ```
 
-```{r}
-str(qualitative_data)
-str(time_series_data)
+## Numbered Day Analysis
+This approach indexes each observation by the number of days that have passed since the respective store opened. In this approach, the first day that the store is open is given a value of "0" in the created column called "Days_Since_Open". From this point, every day is given a value that is calculated based on the number of days that have passed since the store opened through its first year.
 
-head(qualitative_data)
-head(time_series_data)
+```{r numeric_day_analysis}
+#Creates a df using read_csv that handles dates differently
+time_series_data <- read_csv("time_series_data_msba.csv", 
+    col_types = cols(capital_projects.soft_opening_date = col_date(format = "%m/%d/%Y"), 
+        calendar.calendar_day_date = col_date(format = "%m/%d/%Y")))
 
-summary(qualitative_data)
-summary(time_series_data)
-```
-
-```{r}
-is.ts(time_series_data)
-```
-```{r}
 # Create column that shows the number of days the store has been open
 ts_w_days <- time_series_data %>%
   mutate(Days_Since_Open = as.numeric(calendar.calendar_day_date - capital_projects.soft_opening_date)) %>%
+  rename("row_id" = "...1") %>%
   arrange(site_id_msba, calendar.calendar_day_date)
 
-ts_w_days[c(2:4, 12:13)]
-```
 
-```{r}
 # Define the major holidays data frame
 major_holidays <- data.frame(
   calendar.calendar_day_date = as.Date(c(
     "2021-01-01", "2021-01-18", "2021-04-04",
-    "2021-05-31", "2021-07-04", "2021-09-06", "2021-10-11",
-    "2021-10-31", "2021-11-11", "2021-11-25", "2021-12-24",
+    "2021-05-31", "2021-07-04", "2021-09-06", "2021-10-11", "2021-11-11", "2021-11-25", "2021-12-24",
     "2021-12-25", "2021-12-31", "2022-01-01", "2022-01-17",
     "2022-04-17", "2022-05-30", "2022-07-04", "2022-09-05",
-    "2022-10-10", "2022-10-31", "2022-11-11", "2022-11-24",
+    "2022-10-10", "2022-11-11", "2022-11-24",
     "2022-12-24", "2022-12-25", "2022-12-31"
   )),
   Major_Holiday = c(
     "New Year's Day", "Martin Luther King Jr. Day", "Easter Sunday",
     "Memorial Day", "Independence Day", "Labor Day", "Columbus Day",
-    "Halloween", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
-    "Christmas Day", "New Year's Eve", "New Year's Day", "Martin Luther King Jr. Day",
+    "Veterans Day", "Thanksgiving Day", "Christmas Eve", "Christmas Day",
+    "New Year's Eve", "New Year's Day", "Martin Luther King Jr. Day",
     "Easter Sunday", "Memorial Day", "Independence Day", "Labor Day",
-    "Columbus Day", "Halloween", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
+    "Columbus Day", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
     "Christmas Day", "New Year's Eve"
   )
 )
-```
 
-```{r}
 # Merge the original data frame with the major holidays data frame
 ts_w_holidays <- ts_w_days %>%
   left_join(major_holidays, by = c("calendar.calendar_day_date" = "calendar.calendar_day_date"))
@@ -81,14 +74,13 @@ ts_w_holidays <- ts_w_days %>%
 # Make indicator for whether the day fell on a holiday given by Maverik
 ts_all_holidays <- ts_w_holidays %>%
   mutate(General_Holiday = ifelse(calendar_information.holiday == "NONE", 0, 1))
-
-# Check to make sure holidays are represented correctly
-ts_all_holidays[c("calendar_information.holiday", "Major_Holiday", "General_Holiday")]
-
-# Could remove calendar_information.holiday now that General Holiday gives same information
 ```
 
+## Sales variaton by day of week
+There appears to be some clear trends by day of week that span the different target variables. For example, average sales fall on Sunday for each of the individual target variables. 
+
 ```{r}
+#Creates a day of week summary dataframe 
 dow_summary <- ts_all_holidays %>%
   group_by(calendar.day_of_week) %>%
   summarize(Avg_inside_sales = mean(daily_yoy_ndt.total_inside_sales),
@@ -96,28 +88,14 @@ dow_summary <- ts_all_holidays %>%
             Avg_diesel_sales = mean(diesel),
             Avg_unleaded_sales = mean(unleaded))
 
-dow_summary
-```
+# Create the table using kable for better display in html
+html_table <- knitr::kable(dow_summary, format = "html")
 
-```{r, out.width='100%', out.height='100%'}
-# Define the order of days of the week
-day_order <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+# Apply kable_styling to adjust column width
+day_of_week_summary_table <- kable_styling(html_table, full_width = TRUE)  # Set full_width to TRUE if you want the table to occupy the full width of the page
 
-# Reorder the factor levels of calendar.day_of_week
-ts_all_holidays$calendar.day_of_week <- factor(ts_all_holidays$calendar.day_of_week, levels = day_order)
-
-# Create the boxplot with the ordered days of the week
-day_of_week_bp <- ggplot(ts_all_holidays,
-  aes(x = calendar.day_of_week, y = unleaded, color = calendar.day_of_week)) +
-  geom_boxplot(fill = "white") +
-  theme(panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        panel.border = element_blank(),
-        panel.background = element_blank()) +
-  labs(title = "Unleaded Sales tend to be the highest on Fridays", x = "Day of Week", y = "Unleaded Sales") +
-  guides(color = FALSE)
-
-day_of_week_bp
+# Print the day of the week summary table
+day_of_week_summary_table
 ```
 
 ```{r, out.width='100%', out.height='100%'}
@@ -143,10 +121,29 @@ line_chart_ordered <- ggplot(data_long, aes(x = calendar.day_of_week, y = Averag
 print(line_chart_ordered)
 ```
 
-```{r}
-ts_all_holidays[c(1, 8:13)]
+The following boxplot for average sales by day of week indicates a slight uptick in sales for Thursday and Friday. There appear to be outliers for each of the estimates that might be partially explained by holiday travel. 
 
-# Create the line graph
+```{r, out.width='100%', out.height='100%'}
+# Reorder the factor levels of calendar.day_of_week
+ts_all_holidays$calendar.day_of_week <- factor(ts_all_holidays$calendar.day_of_week, levels = day_order)
+
+# Create the boxplot with the ordered days of the week
+day_of_week_bp <- ggplot(ts_all_holidays,
+  aes(x = calendar.day_of_week, y = unleaded, color = calendar.day_of_week)) +
+  geom_boxplot(fill = "white") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  labs(title = "Unleaded Sales tend to be the highest on Fridays", x = "Day of Week", y = "Unleaded Sales") +
+  guides(color = FALSE)
+
+# Prints the day of week boxplot
+day_of_week_bp
+```
+
+```{r}
+# Create line graph of all stores sales over time
 ggplot(ts_all_holidays, aes(x = Days_Since_Open, y = daily_yoy_ndt.total_inside_sales, group = site_id_msba, color = factor(site_id_msba))) +
   geom_line() +
   labs(title = "Daily YOY Total Inside Sales",
@@ -156,48 +153,399 @@ ggplot(ts_all_holidays, aes(x = Days_Since_Open, y = daily_yoy_ndt.total_inside_
   theme_minimal()
 ```
 
+## Sales categories variaton over time
+To better understand trends of sales for the main categories over the same window of time (from the day the store opened through the first year), we selected four stores that have varying qualitative variables associated with them. Inside and food sales are fairly consistent across the stores selected but there is some variation in unleaded sales and a clear distinction in diesel sales of store 21980 compared to the others. It is more difficult to distinguish the differences in unleaded sales; however, store 22785 seems to experiencing the same seasonal trend but on a different timeline. This finding is how we began to question if we should create a feature that shows what season the store opened in which would allow us to address these potential differences in the modeling process.
+
 ```{r, out.width='100%', out.height='100%'}
-# Choose stores to highlight
+# Choose stores to highlight their trends over time
 selected_stores <- c(21980, 23240, 24150, 22785)
+#selected_stores <- c(21560, 22015, 22085, 22120)
+#selected_stores <- c(22260, 22330, 22400, 22505)
+#selected_stores <- c(22540, 22575, 22645, 22680)
+#selected_stores <- c(22715, 22750, 22820, 22855)
+#selected_stores <- c(22890, 22925, 23065, 23135)
+#selected_stores <- c(23345, 23380, 23415, 23450)
+#selected_stores <- c(23485, 23555, 23660, 23730)
+#selected_stores <- c(23765, 23835, 23905, 24220, 24535)
 
 # Filter the data to include only the selected stores
 stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% selected_stores, ]
 
-# Create the line graph
-ggplot(stores_of_interest, aes(x = Days_Since_Open, y = daily_yoy_ndt.total_inside_sales, group = site_id_msba, color = factor(site_id_msba))) +
-  geom_line(size = 1) +
-  labs(title = "Daily Total Inside Sales for Selected Stores",
+#creates a subset of stores of interest
+soi_long <- stores_of_interest %>%
+  dplyr::select("Days_Since_Open", "site_id_msba", "daily_yoy_ndt.total_inside_sales", "daily_yoy_ndt.total_food_service","diesel","unleaded") %>%
+  rename("inside_sales" = "daily_yoy_ndt.total_inside_sales",
+         "food_sales" = "daily_yoy_ndt.total_food_service")
+
+#creates a long form of the previous subset
+soi_long <- melt(soi_long, id.vars = c("Days_Since_Open","site_id_msba"), variable.name = "product_type", value.name = "average_sales")
+
+#generates a facet plot of the select stores
+ggplot(soi_long, aes(x=Days_Since_Open, y=average_sales, group = site_id_msba, color=factor(site_id_msba))) +
+  geom_line(size = 1) + facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for Selected Stores",
        x = "Number of Days Open",
-       y = "Total Inside Sales",
+       y = "Total Sales",
        color = "Store ID") +
   theme_minimal()
 
-# Create the line graph
-ggplot(stores_of_interest, aes(x = Days_Since_Open, y = diesel, group = site_id_msba, color = factor(site_id_msba))) +
-  geom_line(size = 1) +
-  labs(title = "Diesel Sales in First Year for Selected Stores",
-       x = "Number of Days Open",
-       y = "Total Diesel Sales",
-       color = "Store ID") +
-  theme_minimal()
+```
 
-# Create the line graph of selected stores
-ggplot(stores_of_interest, aes(x = Days_Since_Open, y = unleaded, group = site_id_msba, color = factor(site_id_msba))) +
-  geom_line(size = 1) +
-  labs(title = "Unleaded Sales in First Year for Selected Stores",
+```{r stores}
+#Creates a dataframe with a store-level focus
+stores_df <- ts_all_holidays %>%
+  dplyr::select("site_id_msba", 
+         "diesel", 
+         "unleaded", 
+         "daily_yoy_ndt.total_inside_sales",
+         "daily_yoy_ndt.total_food_service") %>%
+  rename("site_id" = "site_id_msba",
+         'inside_sales' = 'daily_yoy_ndt.total_inside_sales',
+         'food_sales' = 'daily_yoy_ndt.total_food_service'
+         )
+
+#Average values for stores
+stores_tibble <- stores_df %>%
+  group_by(site_id) %>%
+  summarize(Avg_Gas= mean(unleaded),
+            Avg_Diesel = mean(diesel),
+            Avg_Store_Sales = mean(inside_sales),
+            Avg_Food_Sales = mean(food_sales))
+
+# Only display the top 10 rows in html output
+top_10_rows <- head(stores_tibble, 10)
+
+# Create the table using kable for better display in html
+stores_table <- knitr::kable(top_10_rows, format = "html")
+
+# Apply kable_styling to adjust column width
+store_averages_table <- kable_styling(stores_table, full_width = TRUE)  # Set full_width to TRUE if you want the table to occupy the full width of the page
+
+# Print the store_averages_table table
+store_averages_table
+```
+
+## Differences in Holidays and Non-holidays
+We think that holidays could be an important consideration to make in the modeling process as days and weekends associated with them could be impactful on sales projections. For this reason we wanted to look at the holidays given by Maverik, which we labeled as "general holidays", compared to non-holidays as well as holidays we deemed as "major holidays", meaning customers generally get the day or days surrounding it off from work or school. The table below shows general holidays tend to have lower sales in all categories when it comes to average and maximum sales compared to regular days; however, there does not appear to be any significant differences that should be investigated further.
+
+```{r}
+ts_with_holidays <- ts_all_holidays %>%
+  mutate(major_holiday_indicator = ifelse(Major_Holiday == "NA", 0, 1))
+
+holiday_table <- ts_with_holidays %>%
+  mutate(General_Holiday = ifelse(General_Holiday == 0, "Not a holiday", "General Holiday")) %>%
+  group_by(General_Holiday) %>%
+  summarize(`Maximum Unleaded Sales` = max(unleaded),
+            `Minimum Unleaded Sales` = min(unleaded),
+            `Average Unleaded Sales` = mean(unleaded),
+            `Maximum Diesel Sales` = max(diesel),
+            `Minimum Diesel Sales` = min(diesel),
+            `Average Diesel Sales` = mean(diesel),
+            `Maximum Inside Sales` = max(daily_yoy_ndt.total_inside_sales),
+            `Average Inside Sales` = mean(daily_yoy_ndt.total_inside_sales),
+            `Maximum Food Sales` = max(daily_yoy_ndt.total_food_service),
+            `Average Food Sales` = mean(daily_yoy_ndt.total_food_service))
+
+# Create the table using kable for better display in html
+holidays <- knitr::kable(holiday_table, format = "html")
+
+# Apply kable_styling to adjust column width
+holiday_summary_table <- kable_styling(holidays, full_width = TRUE)  # Set full_width to TRUE if you want the table to occupy the full width of the page
+
+# Print the holiday summary table
+holiday_summary_table
+```
+
+To better capture how holidays may impact sales at Maverik, we decided to narrow the scope by distinguishing major holidays from general holidays. The below table shows larger differences when distinguishing major holidays from the rest of the business days, meaning that sales, on average, tend to be lower across all categories when it is a major holiday compared against general holidays and regular business days.  
+
+```{r}
+major_holiday_table <- ts_with_holidays %>%
+  mutate(major_holiday_indicator = ifelse(major_holiday_indicator == 1, "Major Holiday", "")) %>%
+  group_by(major_holiday_indicator) %>%
+  summarize(`Maximum Unleaded Sales` = max(unleaded),
+            `Minimum Unleaded Sales` = min(unleaded),
+            `Average Unleaded Sales` = mean(unleaded),
+            `Maximum Diesel Sales` = max(diesel),
+            `Minimum Diesel Sales` = min(diesel),
+            `Average Diesel Sales` = mean(diesel),
+            `Maximum Inside Sales` = max(daily_yoy_ndt.total_inside_sales),
+            `Average Inside Sales` = mean(daily_yoy_ndt.total_inside_sales),
+            `Maximum Food Sales` = max(daily_yoy_ndt.total_food_service),
+            `Average Food Sales` = mean(daily_yoy_ndt.total_food_service)) %>%
+  rename("Type of Day" = major_holiday_indicator)
+
+# Replace NA with "Normal Business Day" in the table
+major_holiday_table$`Type of Day` <- ifelse(is.na(major_holiday_table$`Type of Day`), "Normal Business Day", major_holiday_table$`Type of Day`)
+
+# Create the table using kable for better display in html
+major_holidays <- knitr::kable(major_holiday_table, format = "html")
+
+# Apply kable_styling to adjust column width
+major_holidays_summary_table <- kable_styling(major_holidays, full_width = TRUE)  # Set full_width to TRUE if you want the table to occupy the full width of the page
+
+# Print the major holiday summary table
+major_holidays_summary_table
+```
+
+```{r}
+# Create the density plot for Food Service Sales
+food_service_plot <- ggplot(ts_with_holidays, aes(x = daily_yoy_ndt.total_food_service, fill = as.factor(`major_holiday_indicator`))) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Food Service Sales Distributions", x = "Sales", fill = "Type of Day") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  scale_fill_manual(values = c("#CC0000", "#C1CDCD"), 
+                    labels = c("Major Holiday", "Not a holiday"))
+
+# Create the density plot for Inside Sales
+inside_sales_plot <- ggplot(ts_with_holidays, aes(x = daily_yoy_ndt.total_inside_sales, fill = as.factor(`major_holiday_indicator`))) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Inside Sales Distributions", x = "Sales", fill = "Type of Day") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  scale_fill_manual(values = c("#CC0000", "#C1CDCD"), 
+                    labels = c("Major Holiday", "Not a holiday"))
+
+# Create the density plot for Diesel Gallons Sold
+diesel_gallons <- ggplot(ts_with_holidays, aes(x = diesel, fill = as.factor(`major_holiday_indicator`))) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Diesel Gallons Sold Distributions", x = "Gallons", fill = "Type of Day") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  scale_fill_manual(values = c("#CC0000", "#C1CDCD"), 
+                    labels = c("Major Holiday", "Not a holiday"))
+
+# Create the density plot for Unleaded Gallons Sold
+unleaded_gallons <- ggplot(ts_with_holidays, aes(x = unleaded, fill = as.factor(`major_holiday_indicator`))) +
+  geom_density(alpha = 0.6) +
+  labs(title = "Unleaded Gallons Sold Distributions", x = "Gallons", fill = "Type of Day") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank()) +
+  scale_fill_manual(values = c("#CC0000", "#C1CDCD"), 
+                    labels = c("Major Holiday", "Not a holiday"))
+
+# Display all plots in one visualization
+grid.arrange(food_service_plot, inside_sales_plot, diesel_gallons, unleaded_gallons, ncol = 2)
+
+```
+
+The above visualization confirms that major holidays may negatively affect business at Maverik, at least on the actual day of the holiday. We plan to explore this relationship further in the modeling process through feature engineering that will allow us to see if the days surrounding these holidays have an impact that lessens or exacerbates the impact holidays have on the business.
+
+```{r}
+result <- ts_all_holidays %>%
+  group_by(site_id_msba) %>%
+  summarise(food_sales = sum(daily_yoy_ndt.total_food_service, na.rm = TRUE),
+            inside_sales = sum(daily_yoy_ndt.total_inside_sales, na.rm = TRUE),
+            diesel_sales = sum(diesel, na.rm = TRUE),
+            unleaded_sales = sum(unleaded, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(food_sales))
+
+most_food_sales <- result$site_id_msba[1:5]
+
+# Filter the data to include only the selected stores
+stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% most_food_sales, ]
+
+#creates a subset of stores of interest
+soi_long <- stores_of_interest %>%
+  dplyr::select("Days_Since_Open", "site_id_msba", "daily_yoy_ndt.total_inside_sales", "daily_yoy_ndt.total_food_service","diesel","unleaded") %>%
+  rename("inside_sales" = "daily_yoy_ndt.total_inside_sales",
+         "food_sales" = "daily_yoy_ndt.total_food_service")
+
+#creates a long form of the previous subset
+soi_long <- melt(soi_long, id.vars = c("Days_Since_Open","site_id_msba"), variable.name = "product_type", value.name = "average_sales")
+
+#generates a facet plot of the select stores
+ggplot(soi_long, aes(x=Days_Since_Open, y=average_sales, group = site_id_msba, color=factor(site_id_msba))) +
+  geom_line(size = 1) + facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for Stores with highest Annual Food Sales",
        x = "Number of Days Open",
-       y = "Total Unleaded Sales",
+       y = "Total Sales",
        color = "Store ID") +
   theme_minimal()
 ```
 
-## Questions:
-- Should "major holiday' be defined as the ones that people are generally given the day off for? This distinguishes "all holidays" which will have noise from less significant holidays.
-- Add indicator for day before and after major holidays? (Long weekends, vacation days taken around holidays, camping trips?)
-- Make total sales number for each day which is all categories combined?
-  - graph a breakdown of sales in percentages that are contributed by each category
-- Create an indicator for what part of the season the store opened in?
+```{r}
+result2 <- result %>%
+  arrange(desc(inside_sales))
 
-- Look at differences in weekdays vs. weekend trends between the four categories
-_ Facet wrap to be able to show boxplots for each category side by side?
-- Density plot based on holiday not a holiday, major holiday not major holiday
+most_inside_sales <- result2$site_id_msba[1:5]
+
+# Filter the data to include only the selected stores
+stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% most_inside_sales, ]
+
+#creates a subset of stores of interest
+soi_long <- stores_of_interest %>%
+  dplyr::select("Days_Since_Open", "site_id_msba", "daily_yoy_ndt.total_inside_sales", "daily_yoy_ndt.total_food_service","diesel","unleaded") %>%
+  rename("inside_sales" = "daily_yoy_ndt.total_inside_sales",
+         "food_sales" = "daily_yoy_ndt.total_food_service")
+
+#creates a long form of the previous subset
+soi_long <- melt(soi_long, id.vars = c("Days_Since_Open","site_id_msba"), variable.name = "product_type", value.name = "average_sales")
+
+#generates a facet plot of the select stores
+ggplot(soi_long, aes(x=Days_Since_Open, y=average_sales, group = site_id_msba, color=factor(site_id_msba))) +
+  geom_line(size = 1) + facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for Stores with highest Annual Inside Sales",
+       y = "Total Sales",
+       color = "Store ID") +
+  theme_minimal()
+```
+
+```{r}
+result3 <- result %>%
+  arrange(desc(diesel_sales))
+
+most_diesel_sales <- result3$site_id_msba[1:5]
+
+# Filter the data to include only the selected stores
+stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% most_diesel_sales, ]
+
+#creates a subset of stores of interest
+soi_long <- stores_of_interest %>%
+  dplyr::select(Days_Since_Open, site_id_msba, `daily_yoy_ndt.total_inside_sales`, `daily_yoy_ndt.total_food_service`, diesel, unleaded) %>%
+  dplyr::rename("inside_sales" = "daily_yoy_ndt.total_inside_sales",
+         "food_sales" = "daily_yoy_ndt.total_food_service")
+
+#creates a long form of the previous subset
+soi_long <- melt(soi_long, id.vars = c("Days_Since_Open","site_id_msba"), variable.name = "product_type", value.name = "average_sales")
+
+# Define a specific store ID to be represented in red
+target_store <- "21980"
+
+# Create a column in soi_long to differentiate the colors
+soi_long$color <- ifelse(soi_long$site_id_msba == target_store, "Target", "Other")
+
+#generates a facet plot of the select stores
+ggplot(soi_long, aes(x=Days_Since_Open, y=average_sales, group = site_id_msba, color=factor(site_id_msba))) +
+  geom_line(size = 1) + facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for Stores with highest Annual Diesel Sales",
+       x = "Number of Days Open",
+       y = "Total Sales",
+       color = "Store ID") +
+  theme_minimal()
+
+# Manually set colors in ggplot
+ggplot(soi_long, aes(x = Days_Since_Open, y = average_sales, group = site_id_msba, color = color)) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("Target" = "firebrick2", "Other" = "gray48"),
+                     labels = c("Top Stores in Annual Diesel Sales", "Store 21980")) +
+  facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for Stores with Highest Annual Diesel Sales",
+       x = "Number of Days Open",
+       y = "Total Sales",
+       color = "Store ID") +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 12, color = "black"),
+        axis.title = element_text(size = 14),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14), # Adjust legend text size
+        legend.title = element_text(size = 17),
+        strip.text = element_text(size = 16))
+```
+
+```{r}
+result4 <- result %>%
+  arrange(desc(unleaded_sales))
+
+most_unleaded_sales <- result4$site_id_msba[1:5]
+
+# Filter the data to include only the selected stores
+stores_of_interest <- ts_all_holidays[ts_all_holidays$site_id_msba %in% most_unleaded_sales, ]
+
+#creates a subset of stores of interest
+soi_long <- stores_of_interest %>%
+  select("Days_Since_Open", "site_id_msba", "daily_yoy_ndt.total_inside_sales", "daily_yoy_ndt.total_food_service","diesel","unleaded") %>%
+  rename("inside_sales" = "daily_yoy_ndt.total_inside_sales",
+         "food_sales" = "daily_yoy_ndt.total_food_service")
+
+#creates a long form of the previous subset
+soi_long <- melt(soi_long, id.vars = c("Days_Since_Open","site_id_msba"), variable.name = "product_type", value.name = "average_sales")
+
+#generates a facet plot of the select stores
+ggplot(soi_long, aes(x=Days_Since_Open, y=average_sales, group = site_id_msba, color=factor(site_id_msba))) +
+  geom_line(size = 1) + facet_wrap(~product_type) + 
+  labs(title = "Daily Sales for  Stores with highest Annual Unleaded Sales",
+       x = "Number of Days Open",
+       y = "Total Sales",
+       color = "Store ID") +
+  theme_minimal()
+```
+
+```{r}
+#imports a few key variables from qualitative data set
+important_qual <- qual_data %>%
+  select(
+    "site_id_msba",
+    "square_feet",
+    "parking_spaces",
+    "lottery",
+    "bonfire_grill",
+    "pizza",
+    "ethanol_free",
+    "hi_flow_lanes",
+    "rv_lanes",
+    "def",
+    "rv_dumps",
+    "x1_mile_pop",
+    "x1_mile_emp",
+    "x1_mile_income",
+    "x5_min_pop",
+    "x5_min_emp",
+    "x5_min_inc",
+    "x7_min_pop",
+    "x7_min_emp",
+    "x7_min_inc",
+    "traditional_forecourt_layout",
+    "rv_lanes_fueling_positions",
+    "hi_flow_lanes_fueling_positions"
+  )
+
+ts_with_holidays$month_of_opening <- month(ts_with_holidays$capital_projects.soft_opening_date)
+ts_with_holidays$day_of_opening <- day(ts_with_holidays$capital_projects.soft_opening_date)
+
+# Create a function to map months to seasons
+get_season <- function(month) {
+  if (month %in% c(12, 1, 2)) {
+    return("Winter")
+  } else if (month %in% c(3, 4, 5)) {
+    return("Spring")
+  } else if (month %in% c(6, 7, 8)) {
+    return("Summer")
+  } else if (month %in% c(9, 10, 11)) {
+    return("Fall")
+  } else {
+    return("Unknown")  # Handle unexpected values
+  }
+} 
+
+# Apply the function to create the season indicator column
+ts_with_holidays$season_indicator <- sapply(ts_with_holidays$month_of_opening, get_season)
+
+df_merged <- ts_with_holidays %>%
+  inner_join(qual_data, by = "site_id_msba")
+
+df_for_modeling <- df_merged[c(1, 4:5, 7:13, 16, 17:19, 20:73)]
+```
+
+```{r}
+df_for_modeling %>%
+  group_by(season_indicator) %>%
+  summarize(num_stores = n_distinct(site_id_msba),
+            Avg_inside_sales = mean(daily_yoy_ndt.total_inside_sales),
+            Avg_food_service = mean(daily_yoy_ndt.total_food_service),
+            Avg_diesel_sales = mean(diesel.x),
+            Avg_unleaded_sales = mean(unleaded),
+            Avg_sq_ft = mean(square_feet.y),
+            Avg_parking_spaces = mean(parking_spaces.x),
+            Perc_with_lottery = (sum(lottery.x == "Yes")/ n()) * 100,
+            Perc_with_Bonfire_Grill = (sum(bonfire_grill.x == "Yes")/ n()) * 100)
+```
