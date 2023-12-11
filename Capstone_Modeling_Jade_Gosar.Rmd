@@ -1,0 +1,1117 @@
+---
+title: "Capstone_3_EDA"
+output: html_document
+date: "2023-10-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages}
+# load necessary packages
+library(lubridate)
+library(tidyverse)
+library(zoo)
+library(ggplot2)
+library(melt)
+library(reshape2)
+library(corrplot)
+library(knitr)
+library(formattable)
+library(kableExtra)
+library(gridExtra)
+library(forecast)
+library(glmnet)
+library(data.table)
+library(dplyr)
+library(huxtable)
+library(magrittr)
+library(tseries)
+library(fpp2)
+library(vars)
+```
+
+# Introductory Section
+
+## Introduction
+University of Utah MSBA students Garish Prajapat, Paula Soutostefani, Jade Gosar, and Karson Eilers (subsequently referred to as 'group 4') are assigned to help Maverik use recent store sales data to form a model capable of predicting daily sales volumes for diesel, unleaded gasoline, inside store sales, and food sales. After our exploratory data analysis, we found many trends in the data can be captured with the term "seasonality" as it refers to common trends that are found not only across seasons of the year but also across days of the week. Other interesting relationships that we found were that holidays negatively influence sales across all categories at Maverik stores and the sales in almost all categories peak on Friday and decrease throughout the span of the weekend. This notebook covers the feature engineering that was performed to account for some of the trends that are present within the data as well as the models that our group created to predict sales for each revenue stream category present in Maverik stores over its first year of being open. In specific, we created models that explored the variables that are significant in predicting the sales which allowed us to gauge how important the features we engineered were and how they improved model performance. Our final model was a VAR (a vector autoregressive model) that we applied to the test set to measure how well it performed with the inclusion of the important variables identified in our other models.
+
+## Data Description
+Maverik provided group four with two data sets and a list of data definitions for each metric:
+<ul>
+<li> <strong>time_series_data_msba.csv</strong> contains daily store sales for all four target variables over the 38 stores' respective first years of operation. It also contains opening dates, holidays, day of week, and site ID. There are 12 total variables.</li>
+<li> <strong>qualitative_data_msba</strong> contains 53 features of additional operation details for each store. These include a range of information like store layout, fueling station layout, food options, etc.</li>
+</ul>
+
+# Data Preparation
+
+```{r data_imports}
+#imports time series analysis dataset
+ts_data <- read_csv('time_series_data_msba.csv')
+
+#removes import observation index column
+ts_data <- ts_data %>%
+  dplyr::select(-...1)
+
+# Select Qual features
+select_qual <- read_csv("qualitative_data_msba.csv")
+
+#Dropping index value
+select_qual <- select_qual %>%
+  dplyr::select(-...1, 
+         -diesel)
+
+# Create column that shows the number of days the store has been open
+ts_w_days <- ts_data %>%
+  mutate(Days_Since_Open = as.numeric((calendar.calendar_day_date - capital_projects.soft_opening_date) +1)) %>%
+  arrange(site_id_msba, calendar.calendar_day_date)
+
+#merge defaults as an inner join
+#Merge qual_data and ts
+ts_w_days <- merge(ts_w_days, select_qual, by="site_id_msba")
+
+ts_w_days$calendar_information.holiday <- as.factor(ts_w_days$calendar_information.holiday)
+```
+
+## Standardizing Time Feature
+
+The first feature that we created was a column that tracks the number of days that the store has been open so that there is a standardized way to compare across stores. This approach indexes each observation by the number of days that have passed since the respective store opened. In this feature engineering, the first day that the store is open is given a value of "0" in the created column called "Days_Since_Open". From this point, every day is given a value that is calculated based on the number of days that have passed since the store opened through its first year. We decided to add this feature to the data so that categories such as food sales and inside store sales that appear to have significant seasonal effects could be measured from the same starting point.
+
+Those values appear to grow in summer months and decrease into winter months. Unleaded gas and diesel sales show some volatility, but less pronounced seasonal effects.
+
+```{r add_days_since_open, warning=FALSE}
+#Creates a df using read_csv that handles dates differently
+time_series_data <- read_csv("time_series_data_msba.csv", 
+    col_types = cols(capital_projects.soft_opening_date = col_date(format = "%m/%d/%Y"), 
+        calendar.calendar_day_date = col_date(format = "%m/%d/%Y")))
+
+# Create column that shows the number of days the store has been open
+time_series_w_days <- time_series_data %>%
+  dplyr::select(-...1) %>%
+  mutate(Days_Since_Open = as.numeric(calendar.calendar_day_date - capital_projects.soft_opening_date)) %>%
+  arrange(site_id_msba, calendar.calendar_day_date)
+
+# Creates a merged data set, by = site_id_msba by default
+merged_df <- merge(time_series_w_days, select_qual)
+```
+
+## Differences in Holidays and Non-holidays
+
+In our exploratory data analysis, we found that holidays are an important consideration to make in the modeling process as days and weekends associated with them impact sales within Maverik stores. We examined the holidays given by Maverik, which we labeled as "general holidays", compared to non-holidays and found that holidays tend to have lower sales across all categories. To better capture how holidays may impact sales at Maverik, we decided to narrow the scope by distinguishing major holidays from general holidays, with major holidays being ones that customers generally get the day or days surrounding it off from school or work. This analysis showed larger differences when distinguishing major holidays from the rest of the business days, meaning that sales, on average, tend to be lower across all categories when it is a major holiday compared to general holidays and regular business days. For this reason, we created a feature that indicates whether the day was a major holiday or not as determined by our criteria.
+
+```{r major holidays}
+# Define the major holidays data frame
+major_holidays <- data.frame(
+  calendar.calendar_day_date = as.Date(c(
+    "2021-01-01", "2021-01-18", "2021-04-04",
+    "2021-05-31", "2021-07-04", "2021-09-06", "2021-10-11", "2021-11-11", "2021-11-25", "2021-12-24",
+    "2021-12-25", "2021-12-31", "2022-01-01", "2022-01-17",
+    "2022-04-17", "2022-05-30", "2022-07-04", "2022-09-05",
+    "2022-10-10", "2022-11-11", "2022-11-24",
+    "2022-12-24", "2022-12-25", "2022-12-31"
+  )),
+  Major_Holiday = c(
+    "New Year's Day", "Martin Luther King Jr. Day", "Easter Sunday",
+    "Memorial Day", "Independence Day", "Labor Day", "Columbus Day",
+    "Veterans Day", "Thanksgiving Day", "Christmas Eve", "Christmas Day",
+    "New Year's Eve", "New Year's Day", "Martin Luther King Jr. Day",
+    "Easter Sunday", "Memorial Day", "Independence Day", "Labor Day",
+    "Columbus Day", "Veterans Day", "Thanksgiving Day", "Christmas Eve",
+    "Christmas Day", "New Year's Eve"
+  )
+)
+
+# Merge the original data frame with the major holidays data frame
+ts_w_holidays <- merged_df %>%
+  left_join(major_holidays, by = c("calendar.calendar_day_date" = "calendar.calendar_day_date"))
+
+# Make indicator for whether the day fell on a holiday given by Maverik
+ts_with_holidays <- ts_w_holidays %>%
+  mutate(General_Holiday = ifelse(calendar_information.holiday == "NONE", 0, 1))
+
+# Create major holiday indicator column with 1 for major holiday dates
+ts_all_holidays <- ts_with_holidays %>%
+  mutate(major_holiday_indicator = ifelse(is.na(Major_Holiday), 0, 1)) %>%
+  arrange(site_id_msba, Days_Since_Open)
+```
+
+## Turning factor variables into numerical dummy variables
+
+This step of the feature engineering process was needed to be able to include external regressors in the arima models. ARIMA models only work properly on numeric data so features that we want to be included, for example day of week, need to be turned into numeric dummy variables so they can be included as external regressors in the respective ARIMA models.
+
+```{r arima subset}
+# Create a copy of time series df for arima data manipulation
+arima_sub <- as.data.frame(ts_all_holidays)
+
+# Turn day of week into a numeric variable
+arima_sub$day_of_week_num <- as.numeric(factor(arima_sub$calendar.day_of_week, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")))
+
+# Create df with columns for ARIMA model
+arima_vars <- arima_sub %>%
+  dplyr::select("calendar.calendar_day_date", "calendar.fiscal_week_id_for_year", "daily_yoy_ndt.total_inside_sales", "daily_yoy_ndt.total_food_service", "diesel", "unleaded", "site_id_msba", "Days_Since_Open", "major_holiday_indicator", "day_of_week_num")
+```
+
+# Modeling Process and Models
+
+## Partitioning for Training and Testing
+
+The first step in the modeling process was to split the data, including the variables we transformed, into test and train sets based on the site ids. We used 80% of the site ids in the test set, meaning we took all the full year of sales for 30 sites while keeping all the data for 7 sites in the test set. Although we did not end up testing the ARIMA models on the test set and rather opting to use the VAR as our final model, this data split could be used to create the train and test set for the ARIMA models when being applied to a larger dataset with years of seasonality to account for. The ARIMA models use a smaller subset of the data that only includes numeric predictors from the time series data and does not handle other predictors well that we were able to include in our VAR model.
+
+Our modeling approach had different stages and steps to get our team in a place where we felt happy with the overall model performance. Our main goal was to create a final deliverable with a model that produces accurate forecast, considering seasonality for each of the sales metrics, in which the model would update the forecasts as new data comes in for the site ensuring accuracy.
+
+## Linear Regression
+
+We first brainstormed and researched different possible models strategies like LSTM, Weighed moving averages, linear regressions and more complex time series models like VAR and ARIMA. We initially used more basic linear regression models and Variance Inflation Factor in order to perform variable selection and identify the predictors with better predictive power for each of the sales metrics.
+
+```{r}
+#imports a few key variables from qualitative data set
+important_qual <- qual_data %>%
+  select(
+    "site_id_msba",
+    "square_feet",
+    "parking_spaces",
+    "lottery",
+    "bonfire_grill",
+    "pizza",
+    "ethanol_free",
+    "hi_flow_lanes",
+    "rv_lanes",
+    "def",
+    "rv_dumps",
+    "x1_mile_pop",
+    "x1_mile_emp",
+    "x1_mile_income",
+    "x5_min_pop",
+    "x5_min_emp",
+    "x5_min_inc",
+    "x7_min_pop",
+    "x7_min_emp",
+    "x7_min_inc",
+    "traditional_forecourt_layout",
+    "rv_lanes_fueling_positions",
+    "hi_flow_lanes_fueling_positions"
+  )
+
+ts_with_holidays$month_of_opening <- month(ts_with_holidays$capital_projects.soft_opening_date)
+ts_with_holidays$day_of_opening <- day(ts_with_holidays$capital_projects.soft_opening_date)
+
+# Create a function to map months to seasons
+get_season <- function(month) {
+  if (month %in% c(12, 1, 2)) {
+    return("Winter")
+  } else if (month %in% c(3, 4, 5)) {
+    return("Spring")
+  } else if (month %in% c(6, 7, 8)) {
+    return("Summer")
+  } else if (month %in% c(9, 10, 11)) {
+    return("Fall")
+  } else {
+    return("Unknown")  # Handle unexpected values
+  }
+} 
+
+# Apply the function to create the season indicator column
+ts_with_holidays$season_indicator <- sapply(ts_with_holidays$month_of_opening, get_season)
+
+df_merged <- ts_with_holidays %>%
+  inner_join(qual_data, by = "site_id_msba")
+
+df_for_modeling <- df_merged[c(1, 4:5, 7:13, 16, 17:19, 20:73)]
+```
+
+### Create lagged terms
+
+```{r}
+df_for_modeling$calendar_information.type_of_day <- as.factor(df_for_modeling$calendar_information.type_of_day)
+
+df_for_modeling$major_holiday_indicator <- ifelse(is.na(df_for_modeling$major_holiday_indicator), 0, df_for_modeling$major_holiday_indicator)
+
+df_for_modeling <- df_for_modeling %>%
+  rename("diesel" = "diesel.x") %>%
+  rename("diesel_yn" = "diesel.y")
+```
+
+
+```{r}
+# Define the maximum number of lagged days (365)
+max_lagged_days <- 365
+
+# Group the data by site_id_msba
+df_for_modeling <- df_for_modeling %>%
+  group_by(site_id_msba) %>%
+  arrange(Days_Since_Open) %>%
+  mutate(
+    # Create lagged_day_1 within each group
+    lagged_day_1 = c(NA, rep(daily_yoy_ndt.total_inside_sales[1], n() - 1))
+  )
+
+# Create lagged columns using a loop for lagged_day_2 to lagged_day_365
+for (lag_day in 2:max_lagged_days) {
+  col_name <- paste0("lagged_day_", lag_day)
+  df_for_modeling <- df_for_modeling %>% mutate(
+    {{col_name}} := c(rep(NA, lag_day), rep(daily_yoy_ndt.total_inside_sales[lag_day], n() - lag_day))
+  )
+}
+
+# Ungroup the data
+df_for_modeling <- df_for_modeling %>% ungroup()
+```
+
+## Lasso Model
+
+After concluding linear regression for variable selection, we decided to create our first model by using LASSO penalized regression. Our main idea behind this choice was because of how computationally effective LASSO is, and the fact of how LASSO chooses the best predictors variables for each of the sales metrics and reduces the coefficients of the less important predictors. In order to implement that we created a loop in which the sales metrics would be added as a lag from previous historical data into the model as new columns, being used as predictors for the next day forecast.
+
+```{r}
+# Set options to prevent scientific notation and display more digits
+options(scipen = 999, digits = 5)
+
+# Selecting relevant predictors using penalized regression
+predictors <- as.matrix(df_for_modeling[, c(1:3, 9:21, 25:27, 31:33)])
+target <- df_for_modeling$daily_yoy_ndt.total_food_service
+
+# Run a LASSO model
+model_lasso <- glmnet(x = predictors, y = target, alpha=1)
+
+# Determine the best lambda using cross validation
+cross_validation <- cv.glmnet(model.matrix(daily_yoy_ndt.total_food_service~., df)[,-3], target, alpha = 1)
+
+# Create the final model after using cross validation
+final_model <- glmnet(x = model.matrix(daily_yoy_ndt.total_food_service~., df)[,-3], y = target, alpha = 1, lambda = cross_validation$lambda.min)
+
+# Determine the cross validated final lasso model coefficients
+model_coefficients <- coef(final_model, s = "lambda min", exact=FALSE)
+
+# Print model coefficients
+print(model_coefficients)
+```
+
+```{r}
+test_df <- df_for_modeling[, c(4,8:9)]
+
+# Create the lagged_day_1 column
+test_df$lagged_day_1 <- c(NA, rep(test_df$daily_yoy_ndt.total_inside_sales[1], nrow(test_df) - 1))
+
+# Create the lagged_day_2 column
+test_df$lagged_day_2 <- c(rep(NA, 2), rep(test_df$daily_yoy_ndt.total_inside_sales[2], nrow(test_df) - 2))
+
+# Create the lagged_day_3 column
+test_df$lagged_day_3 <- c(rep(NA, 3), rep(test_df$daily_yoy_ndt.total_inside_sales[3], nrow(test_df) - 3))
+
+# Print the resulting data frame
+print(test_df)
+```
+
+```{r}
+# Initialize an empty data frame to store the lagged columns
+lagged_df <- data.frame(Days_Since_Open = test_df$Days_Since_Open)
+
+# Define the maximum number of days (365)
+max_days <- 365
+
+# Create lagged day columns
+for (day in 1:max_days) {
+  col_name <- paste0("lagged_day_", day)
+  lagged_values <- c(rep(NA, day - 1), rep(test_df$daily_yoy_ndt.total_inside_sales[day - 1], nrow(test_df) - day + 1))
+  lagged_df[col_name] <- lagged_values
+}
+
+# Print the resulting data frame
+print(lagged_df)
+```
+
+```{r}
+# Define the maximum number of lagged days (365)
+max_lagged_days <- 365
+
+# Group the data by site_id_msba
+test_df <- test_df %>%
+  group_by(site_id_msba) %>%
+  arrange(Days_Since_Open) %>%
+  mutate(
+    # Create lagged_day_1 within each group
+    lagged_day_1 = c(NA, rep(daily_yoy_ndt.total_inside_sales[1], n() - 1))
+  )
+
+# Create lagged columns using a loop for lagged_day_2 to lagged_day_365
+for (lag_day in 2:max_lagged_days) {
+  col_name <- paste0("lagged_day_", lag_day)
+  test_df <- test_df %>% mutate(
+    {{col_name}} := c(rep(NA, lag_day), rep(daily_yoy_ndt.total_inside_sales[lag_day], n() - lag_day))
+  )
+}
+
+# Ungroup the data
+test_df <- test_df %>% ungroup()
+```
+
+```{r}
+set.seed(4526)
+
+# Create data partition for 80-20 split
+train_set_ids <- df_for_modeling %>%
+  distinct(site_id_msba) %>%
+  sample_frac(0.8, replace = FALSE)
+
+train_set <- df_for_modeling %>%
+  filter(site_id_msba %in% train_set_ids$site_id_msba)
+
+test_set <- df_for_modeling %>%
+  anti_join(train_set_ids, by = "site_id_msba")
+```
+
+## Model for Food Sales
+
+```{r using x5 metrics}
+food_sales_df <- df_for_modeling[,-c(4, 6:7)]
+
+# Training the second model on the 80-20 split
+food_sales_model <- train(daily_yoy_ndt.total_food_service ~., data = food_sales_df, method = "lm", na.action=na.exclude)
+summary(food_sales_model)
+
+# Obtaining predictions from the model
+predictions_food_sales <-predict(food_sales_model, newdata=test_set)
+
+# Calculating RMSE, R-squared, and MAE for the predicted model values
+postResample(predictions_food_sales, test_set$daily_yoy_ndt.total_food_service)
+```
+
+```{r}
+food_test <- train_set[, -c(4, 6:7)]
+
+food_test_sub <- food_test[, -c(5, 8, 14:30, 44:45, 47:48, 50:51, 54:57)]
+
+food_test_sub <- as.data.frame(food_test_sub)
+
+food_target <- food_test_sub$daily_yoy_ndt.total_food_service
+
+# Define the maximum day to consider (365)
+max_days_since_open <- 365
+
+# Create an empty list to store the Lasso models
+lasso_models <- list()
+
+# Loop through each day since open
+for (day in 0:max_days_since_open) {
+  # Subset your data for the specific day
+  subset_data <- food_test_sub[food_test_sub$Days_Since_Open == day, ]
+  
+  # Exclude columns with NAs
+  subset_data <- subset_data[, colSums(is.na(subset_data)) == 0]
+  
+  # Extract the response variable (total_food_service) and predictor variables
+  y <- subset_data$daily_yoy_ndt.total_food_service
+  X <- subset_data
+  
+  # Fit a Lasso model
+  lasso_model <- cv.glmnet(model.matrix(daily_yoy_ndt.total_food_service~., food_test_sub)[,-4], food_target, alpha = 1)  # alpha=1 specifies Lasso
+  
+  # Store the Lasso model in the list
+  lasso_models[[as.character(day)]] <- lasso_model
+}
+```
+
+```{r}
+# Define the maximum day to consider (365)
+max_days_since_open <- 365
+
+# Create an empty list to store the Lasso models
+lasso_models <- list()
+
+# Loop through each day since open
+for (day in 0:max_days_since_open) {
+  # Subset your data for the specific day
+  subset_data <- food_1_store_sub[food_1_store_sub$Days_Since_Open == day, ]
+  
+  # Exclude columns with NAs
+  subset_data <- subset_data[, colSums(is.na(subset_data)) == 0]
+  
+  # Extract the response variable (total_food_service) and predictor variables
+  y <- subset_data$daily_yoy_ndt.total_food_service
+  X <- subset_data
+  
+  # Fit a Lasso model
+  model_matrix <- model.matrix(daily_yoy_ndt.total_food_service ~ ., X)  # Create the model matrix
+  lasso_model <- cv.glmnet(x = model_matrix, y = y, alpha = 1)  # alpha=1 specifies Lasso
+  
+  # Store the Lasso model in the list
+  lasso_models[[as.character(day)]] <- lasso_model
+}
+```
+
+```{r using x1 metrics}
+food_sales2 <- train_set[,c(1:3, 5, 9:24, 31:33)]
+
+food_sales_df2 <- food_sales2[,c(1:2, 4:13, 17:21, 23)]
+
+# Training the second model on the 80-20 split
+food_sales_model2 <- train(daily_yoy_ndt.total_food_service ~., data = food_sales_df2, method = "lm", na.action=na.exclude)
+summary(food_sales_model2)
+
+# Obtaining predictions from the model
+predictions_food_sales2 <-predict(food_sales_model2, newdata=test_set)
+
+# Calculating RMSE, R-squared, and MAE for th e predicted model values
+postResample(predictions_food_sales2, test_set$daily_yoy_ndt.total_food_service)
+```
+
+```{r using x7 metrics}
+food_sales3 <- train_set[,c(1:3, 5, 9:21, 28:33)]
+
+food_sales_df3 <- food_sales3[,c(1:2, 4:13, 17:21, 23)]
+
+# Training the second model on the 80-20 split
+food_sales_model3 <- train(daily_yoy_ndt.total_food_service ~., data = food_sales_df3, method = "lm", na.action=na.exclude)
+summary(food_sales_model3)
+
+# Obtaining predictions from the model
+predictions_food_sales3 <-predict(food_sales_model3, newdata=test_set)
+
+# Calculating RMSE, R-squared, and MAE for the predicted model values
+postResample(predictions_food_sales3, test_set$daily_yoy_ndt.total_food_service)
+```
+
+### Run LASSO regression
+
+```{r}
+food_target <- food_sales_df2$daily_yoy_ndt.total_food_service
+
+# Determine the best lambda using cross validation
+cross_validation_food <- cv.glmnet(model.matrix(daily_yoy_ndt.total_food_service~., food_sales_df2)[,-3], food_target, alpha = 1)
+
+# Create the final model after using cross validation
+food_lasso_model <- glmnet(x = model.matrix(daily_yoy_ndt.total_food_service~., food_sales_df2)[,-3], y = food_target, alpha = 1, lambda = cross_validation_food$lambda.min)
+
+# Determine the cross validated final lasso model coefficients
+food_model_coefficients <- coef(food_lasso_model, s = "lambda min", exact=FALSE)
+
+# Print model coefficients
+print(food_model_coefficients)
+
+```
+
+After creation of the LASSO model, our team decided together with the Professor’s advising to try to develop a more comprehensive time series model in order to use lag values from previous days for the different sales metrics and being able to increase accuracy and decrease RMSE values. With this in mind, we tried two different time series models that per our research have been shown to be effective in time series forecasting analysis: VAR and ARIMA. We chose Vector Autoregressive because of its capacity of capturing the dynamic interactions and feedback effects among multiple variables. On the other hand, we decided to create an ARIMA model because of how it accounts for various patterns, such as linear or nonlinear trends, constant or varying volatility, and seasonal or non-seasonal fluctuations. We believed both models could provide us good insights, and ARIMA could be really helpful considering the nature and fluctuations of our data.
+
+## ARIMA model
+
+The intention behind creating an ARIMA model was to be able to detect the seasonal trends in the data and set the optimal model parameters to account for the various seasonality patterns in the dataset as well as to create a model capable of incorporating lagged time effects and various time qualitative factors. In this approach, we started by creating an basic ARIMA model for a singular store where the optimal model parameters are determined and then applied those values to a more advanced ARIMA model that allowed for a multivariate analysis. Due to the fact there are significant differences in the sales of each store as well as their respective attributes in the dataset, we decided to run an ARIMA model on each store individually using the auto.arima function that selects the optimal parameters of the model for you. Once the optimal model parameters of p, d, and q were selected by the auto.arima function we applied these parameters to an ARIMA model that allowed for us to add additional features. Auto ARIMA models are univariate by nature so, in order to include the features we engineered, we created a model that included external regressors such as if the day was a major holiday, what day of the week it is, and what week of the year it was. This enabled our final model to capture the seasonality in the dataset using the optimal model parameters and learn from information that is captured in the features we engineered.
+
+The below code is the modeling process we used on one site from the training set which the logic was taken from to be applied to all the sites in the training set. This is a univariate model built on inside sales that determines the optimal values of p, d, and q by minimizing AIC but when running this type of model you cannot include other variables other than the target. We decided to compare the performance of the auto.arima created to an ARIMA model that contained other time series variables to measure which one performs better on the data.
+
+```{r}
+# Fix format of holiday indicator
+df_merged$major_holiday_indicator <- ifelse(is.na(df_merged$major_holiday_indicator), 0, df_merged$major_holiday_indicator)
+
+# Subset data for important variables
+auto <- df_merged[c(2:5, 7:13, 16, 19, 22, 25:29, 34:35, 41, 43:59, 61:62)]
+
+auto_sub <- auto[,c(2:12, 14:41)]
+
+auto_sub <- as.data.frame(auto_sub)
+```
+
+```{r}
+# Create a new data frame with unique open dates and the count of unique site IDs for each date
+count_df <- auto %>%
+  group_by(capital_projects.soft_opening_date) %>%
+  summarise(unique_site_count = n_distinct(site_id_msba))
+
+# View the resulting data frame
+print(count_df)
+```
+
+```{r auto arima}
+# Example site ID
+site_id = 22085
+
+# Subset the auto_sub for the specific site ID
+site_data <- arima_vars[arima_vars$site_id_msba == site_id, ]
+
+# Create a time series object
+site_ts <- ts(site_data$daily_yoy_ndt.total_inside_sales, start = as.numeric(format(min(site_data$calendar.calendar_day_date), "%Y")),
+  end = as.numeric(format(max(site_data$calendar.calendar_day_date), "%Y")), frequency = 365)
+
+# Fit an ARIMA model using auto.arima
+site_arima_model <- auto.arima(site_ts)
+
+# Print the model summary
+summary(site_arima_model)
+```
+
+The below visualization shows a plot of the sales categories for this store over its first year of being open. This clearly shows the volatility of sales from day to day and how the sales categories tend to follow very similar patterns in that they rise and fall at the same time points but the magnitude of these changes vary across the categories.
+
+```{r ts visualization}
+myts <- ts(site_data[, 3:6], start = as.numeric(format(min(site_data$calendar.calendar_day_date), "%Y")),
+  end = as.numeric(format(max(site_data$calendar.calendar_day_date), "%Y")), frequency = 365)
+
+# Plot the data with facetting
+autoplot(myts, facets = TRUE)
+```
+
+As the visualizations of the autocorrelation and partial correlation show, there needs to be differencing applied to the model by setting d = 1 to account for seasonality in the data. This is confirmed in the results of the Augmented Dickey-Fuller Test that determines whether a time series meets the stationarity requirement, which the differenced time series does but the non-differenced does not.
+
+```{r applying differencing}
+# Show acf of model with d = 0 vs d = 1
+ggAcf(site_ts)
+ggAcf(diff(site_ts))
+
+acfRes <- acf(diff(site_ts)) # autocorrelation
+pacfRes <- pacf(diff(site_ts))  # partial autocorrelation
+
+# Run Augmented Dickey-Fuller Test to determine if time series meets stationary criteria
+adf.test(site_ts) # p-value < 0.05 indicates the TS is stationary
+adf.test(diff(site_ts), alternative ="stationary")
+```
+
+Due to the fact that we wanted to be able to include the features we engineered into the model, we ran an ARIMA that included external regressors to compare its performance to the model created using the auto arima functionality.
+
+```{r arima with external regressors}
+# Assuming external_regressors is your data frame
+external_regressors <- data.frame(
+  holiday_indicator = site_data$major_holiday_indicator,
+  week_of_yr = site_data$calendar.fiscal_week_id_for_year,
+  day_of_week = site_data$day_of_week_num)
+
+# Convert the binary categorical variable to matrix
+external_regressors_matrix <- model.matrix(~ . - 1, data = external_regressors)
+
+# Hide the column names by setting them to NULL
+colnames(external_regressors_matrix) <- NULL
+
+# Fit an ARIMA model with external regressors
+arima_model <- Arima(site_ts, xreg = external_regressors_matrix)
+
+# Print the model summary
+summary(arima_model)
+```
+
+The variables included in the model above are the feature we created to track significant holidays, number of the week in the calendar year, and day of the week representing "Monday", "Tuesday", etc. The base ARIMA model that includes regressors has a very similar performance to the auto arima model created but has slightly better RMSE and MAE values. The downside of this model is that it is created using 0 values for p,d, and q which was not the optimal combination determined by the auto arima function and therefore misses capturing important seasonality trends. For this reason, we created a final arima model that takes the optimal p,d, and q values set in the auto arima model and applies them to a more complex ARIMA model that contains the external regressors. 
+
+```{r optimal arima values}
+order_values <- arimaorder(site_arima_model)
+
+# Set optimal values from arima to p, d, and q
+p <- order_values[1]
+d <- order_values[2]
+q <- order_values[3]
+```
+
+As the model summary below shows, there is significant improvement in the model when combining the optimal values of p,d, and q determined in the auto.arima function and including external regressors rather than just using one of the approachs.
+
+```{r final arima model}
+# Create ARIMA model with optimal values for p,d, and q including other features
+arima_with_xreg <- Arima(site_ts, order = c(p, d, q), xreg = external_regressors_matrix)
+
+# Model output
+summary(arima_with_xreg)
+```
+
+The outputs below show residual plots for the original auto.arima model and the final ARIMA model that contains external regressors and optimal modeling parameters. The residuals of the final ARIMA model show a more normal distribution and seem to fit the data better than the original model.
+
+```{r compare auto arima to final arima}
+checkresiduals(site_arima_model)
+checkresiduals(arima_with_xreg)
+```
+
+To confirm that the last ARIMA model created captured the relationships present in the data the best, we created plot of the residuals vs fitted values and the actual sales data against the predicted sales from the model. These plots show that the model captures the volatility in the inside sales data for this store fairly well with the largest residuals being when the sales data varies drastically from very high to very low in the span of two days.
+
+```{r}
+residuals <- residuals(arima_with_xreg)
+fitted <- fitted(arima_with_xreg)
+
+# Create a residuals vs. fitted values plot
+plot(fitted, residuals, main = "Residuals vs Fitted", 
+     xlab = "Fitted Values", ylab = "Residuals")
+
+# Add a horizontal line at y = 0 for reference
+abline(h = 0, col = "red", lty = 2)
+
+# Create a sequence of dates from day 1 to day 366
+days_sequence <- seq(from = 1, to = 366, by = 1)
+
+# Plot actual vs. predicted values by day
+plot(days_sequence, site_ts, type = "l", col = "blue", lwd = 2, ylim = c(min(c(site_ts, fitted)), max(c(site_ts, fitted))),
+     xlab = "Day", ylab = "Sales", main = "Actual vs. Predicted")
+
+lines(days_sequence, fitted, col = "red", lty = 2)
+
+# Add a legend
+legend("topright", legend = c("Actual", "Predicted"), col = c("blue", "red"), lty = c(1, 2), lwd = 2)
+```
+
+Ultimately the ARIMA model was informative in the fact that they showed us how dramatically sales data differs across stores. For this reason, and other limitations of the dataset's applicability to ARIMA modeling, we decided that this approach was not going to be as useful to Maverik as our other models but decided to test the accuracy of a singular arima model with external regressors on the test sites. To do so, we created a loop that generated an auto ARIMA model for each of the sites in the train set, then a loop that created an ARIMA model with external regressors for each of the test sites, and finally determined the values of p, d, and q that represented the optimal parameter combinations from the majority of the train set. This combination of p, d, and q values, determined by the majority of the train set, was then applied in a loop to the test sites and RMSE values were calculated as an average across the stores in the test set. The limitations of the dataset that made creating a singular arima model on all the available information are that each store had to be treated as a singular time series object. Even when we tried to create a standardized value for tracking time series days, we were not able to create a time series based on all of the data available which meant we had to create an arima model for each site individually. The loop that we created to implement our final ARIMA models for each store showed that each store has its own respective p, d, and q values that optimize the model and these vary quite a bit from store to store as well as within each sales category of a singular store, which inflated our RMSE scores as we were applying only one combination of p, d, and q values to all test sites. While a better predictive model was created in our other models, we believe that this modeling process could still be of use to Maverik as it illustrates how important the features that we engineered are to improving model performance. For example, the final model that was created above that takes the optimal model parameters from one store, determined by running auto.arima, and applies it an ARIMA model that contains the features we engineered improves model performance substantially, with a decrease in RMSE from 1131.236 in the auto.arima model to 733.1196 in the final model. Other important performance metrics such as MAPE, MAE and autocorrelation of residuals in the final model also show significant improvement over the base auto arima model created. The code used in the workflow outlined above is shown below.
+
+```{r}
+train_set_ids <- unique(train_set$site_id_msba)
+
+test_set_ids <- unique(test_set$site_id_msba)
+
+# Specify which sales category you want to model on
+# Options are diesel, unleaded, daily_yoy_ndt.total_food_service, daily_yoy_ndt.total_inside_sales
+
+target_var_name <- "diesel"
+```
+
+```{r}
+# Create a list to store ARIMA models for each site ID
+arima_models <- list()
+
+for (site_id in train_set_ids) {
+  # Subset the data for the current site ID
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create a time series for the current site
+  site_ts <- ts(target_var,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Fit an ARIMA model for the current site using auto.arima
+  arima_model <- auto.arima(site_ts)
+  
+  # Store the ARIMA model in the list
+  arima_models[[as.character(site_id)]] <- arima_model
+}
+
+# Now, there is a list of auto ARIMA models, one for each site ID in train set
+```
+
+```{r}
+# Create a list to store ARIMA models with external regressors for train site ID
+arima_models_with_xreg <- list()
+
+# Loop through unique site IDs
+for (site_id in train_set_ids) {
+  # Subset the data for the current site ID
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create a time series for the current site
+  site_ts <- ts(target_var,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Subset external regressors for the current site
+  external_regressors <- data.frame(
+    holiday_indicator = site_data_subset$major_holiday_indicator,
+    week_of_yr = site_data_subset$calendar.fiscal_week_id_for_year,
+    day_of_week = site_data_subset$day_of_week_num)
+  
+  # Convert the binary categorical variable to matrix
+  external_regressors_matrix <- model.matrix(~ . - 1, data = external_regressors)
+  
+  # Hide the column names by setting them to NULL
+  colnames(external_regressors_matrix) <- NULL
+  
+  # Fit an ARIMA model with external regressors for the current site
+  arima_model_with_xreg <- Arima(site_ts, xreg = external_regressors_matrix)
+  
+  # Store the ARIMA model in the list
+  arima_models_with_xreg[[as.character(site_id)]] <- arima_model_with_xreg
+}
+
+```
+
+```{r}
+# Create a list to store optimal ARIMA order values for each train site ID
+optimal_orders <- list()
+
+# Loop through unique site IDs
+for (site_id in train_set_ids) {
+  # Subset the data for the current site ID
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create a time series for the current site
+  site_ts <- ts(target_var,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Fit an ARIMA model for the current site using auto.arima
+  arima_model <- auto.arima(site_ts)
+  
+  # Extract the optimal order values (p, d, q) from the ARIMA model
+  order_values <- arimaorder(arima_model)
+  
+  # Store the optimal order values in the list
+  optimal_orders[[as.character(site_id)]] <- order_values
+}
+```
+
+```{r}
+# Convert list elements to a data frame
+optimal_orders_df <- as.data.frame(do.call(rbind, optimal_orders))
+
+# Find the most frequent combination
+most_frequent_combination <- as.data.frame(table(optimal_orders_df$p, optimal_orders_df$d, optimal_orders_df$q))
+names(most_frequent_combination) <- c("p", "d", "q", "frequency")
+most_frequent_combination <- most_frequent_combination[order(-most_frequent_combination$frequency), ]
+
+# Extract the most frequent combination of p, d, and q from the DataFrame
+most_frequent_p <- most_frequent_combination$p[1]
+most_frequent_d <- most_frequent_combination$d[1]
+most_frequent_q <- most_frequent_combination$q[1]
+
+# Convert factor variables to numeric
+most_frequent_p <- as.numeric(as.character(most_frequent_p))
+most_frequent_d <- as.numeric(as.character(most_frequent_d))
+most_frequent_q <- as.numeric(as.character(most_frequent_q))
+```
+
+```{r}
+# Specify the number for observed sales
+observed_sales_end <- 14  # Change this number to the desired value
+
+# Create a list to store total summed values for observed and predicted sales for each site ID
+total_summed_values <- list()
+
+# Loop through each test site ID
+for (site_id in test_set_ids) {
+  # Subset the data for the current site ID from the test set
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create time series object for site id
+  site_ts <- ts(target_var,
+                 start = min(site_data_subset$Days_Since_Open),
+                 frequency = 1)
+  
+  # Specify the ARIMA order values for this site
+  p <- most_frequent_p
+  d <- most_frequent_d
+  q <- most_frequent_q
+  
+  # Extract external regressors for the current site
+  external_regressors <- data.frame(
+    holiday_indicator = site_data_subset$major_holiday_indicator,
+    week_of_yr = site_data_subset$calendar.fiscal_week_id_for_year,
+    day_of_week = site_data_subset$day_of_week_num)
+  
+  external_regressors_matrix <- model.matrix(~ . - 1, data = external_regressors)
+  colnames(external_regressors_matrix) <- NULL
+  
+  # Fit an ARIMA model with specified orders and external regressors for the current site
+  arima_model <- tryCatch({
+    Arima(site_ts, order = c(p, d, q), xreg = external_regressors_matrix)
+  }, error = function(e) {
+    message("Model fitting failed for site ID: ", site_id)
+    return(NULL)
+  })
+  
+  if (!is.null(arima_model)) {
+  # Get observed sales from days 1 to 14
+  observed_sales <- sum(window(site_ts, end = observed_sales_end))
+  
+  # Extract external regressors for the forecasting period
+  forecasted_values_start <- observed_sales_end + 1
+  external_regressors_fc <- external_regressors_matrix[forecasted_values_start:365, ]
+  
+  # Make predictions using external regressors for the specific forecasting period
+  predicted_values <- predict(arima_model, n.ahead = 365 - observed_sales_end, newxreg = external_regressors_fc)
+  
+  # Sum the predicted values for specified days
+  predicted_sales <- sum(predicted_values$pred)
+  
+  # Calculate total summed values for observed sales for specified window and predicted sales for remaining
+  total_summed_values[[as.character(site_id)]] <- observed_sales + predicted_sales
+  }
+}
+```
+
+```{r}
+# Create a list to store RMSE values for each site ID
+rmse_values <- list()
+
+# Loop through each test site ID
+for (site_id in test_set_ids) {
+    # Retrieve the observed sales for the current site ID
+    observed_sales <- sum(arima_vars$target_var_name[arima_vars$site_id_msba == site_id & arima_vars$Days_Since_Open <= observed_sales_end])
+
+    # Get the predicted total summed values for the current site ID
+    predicted_sales <- total_summed_values[[as.character(site_id)]]
+
+    # Calculate the squared difference between observed and predicted values
+    squared_diff <- (observed_sales - predicted_sales)^2
+
+    # Calculate the Root Mean Squared Error (RMSE)
+    rmse <- sqrt(squared_diff)
+
+    # Store RMSE value for the current site ID
+    rmse_values[[as.character(site_id)]] <- rmse
+}
+
+# Calculate the average of RMSE values
+avg_rmse <- mean(unlist(rmse_values))
+```
+
+This code takes the majority value for p, d, and q, irrespective of what combination is the majority.
+
+```{r}
+# Create empty lists to store p, d, and q values
+p_values <- c()
+d_values <- c()
+q_values <- c()
+
+# Loop through each site's optimal order values
+for (site_id in names(optimal_orders)) {
+  orders <- optimal_orders[[site_id]]
+  
+  # Append p, d, and q values to their respective lists
+  p_values <- c(p_values, orders[1])
+  d_values <- c(d_values, orders[2])
+  q_values <- c(q_values, orders[3])
+}
+
+# Count occurrences of p, d, and q values
+p_count <- table(p_values)
+d_count <- table(d_values)
+q_count <- table(q_values)
+
+# View counts for p, d, and q values
+p_count
+d_count
+q_count
+
+```
+
+```{r}
+# Extract the most frequent combination of p, d, and q from the DataFrame
+most_frequent_p <- most_frequent_combination$p[1]
+most_frequent_d <- most_frequent_combination$d[1]
+most_frequent_q <- most_frequent_combination$q[1]
+
+# Convert factor variables to numeric
+most_frequent_p <- as.numeric(as.character(most_frequent_p))
+most_frequent_d <- as.numeric(as.character(most_frequent_d))
+most_frequent_q <- as.numeric(as.character(most_frequent_q))
+
+# Create a list to store ARIMA models for specific site IDs in the test set
+arima_models_test_set <- list()
+
+# Loop through unique site IDs in the test set
+for (site_id in test_set_ids) {
+  # Subset the data for the current site ID
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create a time series for the current site
+  site_ts <- ts(target_var,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Specify the ARIMA order values for this site
+  p <- most_frequent_p
+  d <- most_frequent_d
+  q <- most_frequent_q
+  
+  # Subset external regressors for the current site (if needed)
+  external_regressors <- data.frame(
+    holiday_indicator = site_data_subset$major_holiday_indicator,
+    week_of_yr = site_data_subset$calendar.fiscal_week_id_for_year,
+    day_of_week = site_data_subset$day_of_week_num)
+  
+  external_regressors_matrix <- model.matrix(~ . - 1, data = external_regressors)
+  colnames(external_regressors_matrix) <- NULL
+  
+  # Fit an ARIMA model with specified orders for the current site
+  arima_model <- tryCatch({
+    Arima(site_ts, order = c(p, d, q), xreg = external_regressors_matrix)
+  }, error = function(e) {
+    message("Model fitting failed for site ID: ", site_id)
+    return(NULL)
+  })
+  
+  if (!is.null(arima_model)) {
+    arima_models_test_set[[as.character(site_id)]] <- arima_model
+  }
+}
+```
+
+```{r}
+# Create a list to store total observed sales for each site ID
+total_observed_test_sales <- list()
+
+# Loop through unique site IDs
+for (site_id in test_set_ids) {
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  site_ts <- ts(site_data_subset$`daily_yoy_ndt.total_inside_sales`,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Calculate total observed sales for each site ID
+  total_observed_test_sales[[as.character(site_id)]] <- sum(site_ts)
+}
+
+```
+
+```{r}
+# List to store forecast results for each site ID
+forecast_results <- list()
+
+# Loop through each site ID in the test set
+for (site_id in unique(test_set_arima$site_id_msba)) {
+  # Subset the test set for the specific site ID
+  test_data_site <- test_set_arima[test_set_arima$site_id_msba == site_id, ]
+
+  # Create a time series object for the test data
+  test_ts <- ts(test_data_site$daily_yoy_ndt.total_inside_sales, 
+                start = as.numeric(format(min(test_data_site$calendar.calendar_day_date), "%Y")),
+                end = as.numeric(format(max(test_data_site$calendar.calendar_day_date), "%Y")), 
+                frequency = 365)
+
+  # Use the ARIMA model to make predictions
+  forecast_result <- forecast(site_arima_model, h = length(test_ts))
+
+  # Store the forecast results in the list
+  forecast_results[[as.character(site_id)]] <- forecast_result
+}
+
+# Access individual forecasts using forecast_results
+# For example, forecast_results[['22085']] will give the forecast for site ID 22085
+
+```
+
+```{r}
+# Create a list to store predicted values for each site
+predicted_values_test <- list()
+
+# Loop through each test site ID
+for (site_id in test_set_ids) {
+  # Subset the data for the current site ID from the test set
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Assuming you have a column named 'daily_sales' for daily sales data
+  site_ts <- ts(site_data_subset$`daily_yoy_ndt.total_inside_sales`,
+                 start = as.numeric(format(min(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 end = as.numeric(format(max(site_data_subset$calendar.calendar_day_date), "%Y")),
+                 frequency = 365)
+  
+  # Specify the ARIMA order values for this site
+  p <- most_frequent_p
+  d <- most_frequent_d
+  q <- most_frequent_q
+  
+  # Fit an ARIMA model with specified orders for the current site
+  arima_model <- tryCatch({
+    Arima(site_ts, order = c(p, d, q))
+  }, error = function(e) {
+    message("Model fitting failed for site ID: ", site_id)
+    return(NULL)
+  })
+  
+  if (!is.null(arima_model)) {
+    # Make predictions for days 15 to 365
+    predicted_values <- predict(arima_model, n.ahead = 365 - 14)
+    
+    # Store predicted values for the current site
+    predicted_values_test[[as.character(site_id)]] <- predicted_values$pred
+  }
+}
+
+```
+
+```{r}
+# Specify the number for observed sales
+observed_sales_end <- 14  # Change this number to the desired value
+
+# Create a list to store total summed values for observed and predicted sales for each site ID
+total_summed_values <- list()
+
+# Loop through each test site ID
+for (site_id in test_set_ids) {
+  # Subset the data for the current site ID from the test set
+  site_data_subset <- arima_vars[arima_vars$site_id_msba == site_id, ]
+  
+  # Extract the target variable for the current site ID
+  target_var <- site_data_subset[[target_var_name]]
+  
+  # Create time series object for site id
+  site_ts <- ts(target_var,
+                 start = min(site_data_subset$Days_Since_Open),
+                 frequency = 1)
+  
+  # Specify the ARIMA order values for this site
+  p <- most_frequent_p
+  d <- most_frequent_d
+  q <- most_frequent_q
+  
+  # Extract external regressors for the current site
+  external_regressors <- data.frame(
+    holiday_indicator = site_data_subset$major_holiday_indicator,
+    week_of_yr = site_data_subset$calendar.fiscal_week_id_for_year,
+    day_of_week = site_data_subset$day_of_week_num)
+  
+  external_regressors_matrix <- model.matrix(~ . - 1, data = external_regressors)
+  colnames(external_regressors_matrix) <- NULL
+  
+  # Fit an ARIMA model with specified orders and external regressors for the current site
+  arima_model <- tryCatch({
+    Arima(site_ts, order = c(p, d, q), xreg = external_regressors_matrix)
+  }, error = function(e) {
+    message("Model fitting failed for site ID: ", site_id)
+    return(NULL)
+  })
+  
+  if (!is.null(arima_model)) {
+  # Get observed sales from days 1 to 14
+  observed_sales <- sum(window(site_ts, end = observed_sales_end))
+  
+  # Extract external regressors for the forecasting period
+  forecasted_values_start <- observed_sales_end + 1
+  external_regressors_fc <- external_regressors_matrix[forecasted_values_start:365, ]
+  
+  # Make predictions for days 15 to 365 using external regressors for the specific forecasting period
+  predicted_values <- predict(arima_model, n.ahead = 365 - observed_sales_end, newxreg = external_regressors_fc)
+  
+  # Sum the predicted values for days 15 to 365
+  predicted_sales <- sum(predicted_values$pred)
+  
+  # Calculate total summed values for observed sales for specified windoq and predicted sales for remaining
+  total_summed_values[[as.character(site_id)]] <- observed_sales + predicted_sales
+  }
+}
+```
+
+```{r}
+# Create a list to store RMSE values for each site ID
+rmse_values <- list()
+
+# Loop through each test site ID
+for (site_id in test_set_ids) {
+  # Retrieve the observed sales for the current site ID
+  observed_sales <- sum(arima_vars$target_var_name[arima_vars$site_id_msba == site_id & arima_vars$Days_Since_Open <= observed_sales_end])
+  
+  # Get the predicted total summed values for the current site ID
+  predicted_sales <- total_summed_values[[as.character(site_id)]]
+  
+  # Calculate the squared difference between observed and predicted values
+  squared_diff <- (observed_sales - predicted_sales)^2
+  
+  # Calculate the Root Mean Squared Error (RMSE)
+  rmse <- sqrt(squared_diff)
+  
+  # Store RMSE value for the current site ID
+  rmse_values[[as.character(site_id)]] <- rmse
+}
+
+# View RMSE values for each site ID
+rmse_values
+```
+
