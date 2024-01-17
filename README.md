@@ -1,4 +1,4 @@
-# Maverik-Case-Competition
+# Maverik Case Competition
 
 This project was completed as a part of the Masters of Science in Business Analytics program at the University of Utah in the final Capstone course. Maverik was the sponsor of the case competition in which we were tasked with providing accurate forecasts for a new store's first year of sales in four major product categories.
 
